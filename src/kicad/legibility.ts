@@ -76,7 +76,10 @@ export const DEFAULT_THRESHOLDS: LegibilityThresholds = {
 /** File-precision noise must never flip a finding (design C7). */
 const TOL = 0.01;
 /** Stroke-font advance as a fraction of height, tuned BELOW the true average (design C3). */
+/** Stroke-font advance as a fraction of height. KiCad stroke font advances at ~0.76-0.78 (closes #307). */
 const TEXT_ADVANCE = 0.6;
+/** Group caption advance as a fraction of height. KiCad stroke font advances at ~0.76-0.78 (#307). */
+const CAPTION_ADVANCE = 0.78;
 /** Drawing-frame inset from the paper edge. */
 const FRAME_BORDER = 10;
 /** Reserved title-block rectangle in the bottom-right of the frame, clamped on small pages. */
@@ -191,8 +194,10 @@ function textBounds(t: {
   height: number;
   justifyH?: 'left' | 'right' | null;
   justifyV?: 'top' | 'bottom' | null;
+  isCaption?: boolean;
 }): Bounds {
-  const w = Math.max(1, t.text.length) * TEXT_ADVANCE * t.height;
+  const advance = t.isCaption ? CAPTION_ADVANCE : TEXT_ADVANCE;
+  const w = Math.max(1, t.text.length) * advance * t.height;
   const h = t.height;
   const vertical = Math.abs(t.rot % 180) === 90;
   const [bw, bh] = vertical ? [h, w] : [w, h];
@@ -327,6 +332,7 @@ interface Group {
   rect: RectItem;
   bounds: Bounds;
   caption: string | null;
+  capItem?: TextItem;
   label: string;
 }
 
@@ -427,25 +433,6 @@ function checkSheet(
   });
   const realSyms = syms.filter((s) => !s.sym.isPower);
 
-  const visibleTexts: { owner: string; ownerRef: string | null; t: TextItem; box: Bounds }[] = [];
-  for (const s of sheet.symbols) {
-    for (const p of s.props) {
-      if (!p.hidden && p.text) visibleTexts.push({ owner: `${s.ref} ${p.text === s.value ? 'Value' : 'Reference'}`, ownerRef: s.ref, t: p, box: textBounds(p) });
-    }
-  }
-  for (const t of sheet.texts) {
-    if (!t.hidden && t.text) visibleTexts.push({ owner: `text "${t.text}"`, ownerRef: null, t, box: textBounds(t) });
-  }
-  const labelBoxes = sheet.labels.map((l) => ({
-    l,
-    box: labelBounds(l),
-    // a plain label stands above its wire, so every wire through the anchor
-    // is its attachment; a flag is drawn centred on the anchor line, so a
-    // wire continuing under the text runs through the flag — only the wire
-    // behind the tip (the pole side) attaches it
-    attached: sheet.wires.filter((w) => pointOnSeg(l.x, l.y, w) && (l.kind === 'label' || onPoleSide(w, l))),
-  }));
-
   // --- groups (design C1): sheet rectangles with a caption in the top band ---
   const groups: Group[] = sheet.rectangles.map((rect, i) => {
     const bounds: Bounds = {
@@ -459,8 +446,32 @@ function checkSheet(
       (t) => !t.hidden && t.text && pointIn(t.x, t.y, bounds) && t.y <= bounds.minY + band,
     );
     const caption = cap?.text ?? null;
-    return { rect, bounds, caption, label: caption ?? `group#${i + 1}` };
+    return { rect, bounds, caption, capItem: cap, label: caption ?? `group#${i + 1}` };
   });
+
+  const captionTexts = new Set(groups.map((g) => g.capItem).filter(Boolean));
+
+  const visibleTexts: { owner: string; ownerRef: string | null; t: TextItem; box: Bounds }[] = [];
+  for (const s of sheet.symbols) {
+    for (const p of s.props) {
+      if (!p.hidden && p.text) visibleTexts.push({ owner: `${s.ref} ${p.text === s.value ? 'Value' : 'Reference'}`, ownerRef: s.ref, t: p, box: textBounds(p) });
+    }
+  }
+  for (const t of sheet.texts) {
+    if (!t.hidden && t.text) {
+      const isCaption = captionTexts.has(t);
+      visibleTexts.push({ owner: `text "${t.text}"`, ownerRef: null, t, box: textBounds({ ...t, isCaption }) });
+    }
+  }
+  const labelBoxes = sheet.labels.map((l) => ({
+    l,
+    box: labelBounds(l),
+    // a plain label stands above its wire, so every wire through the anchor
+    // is its attachment; a flag is drawn centred on the anchor line, so a
+    // wire continuing under the text runs through the flag — only the wire
+    // behind the tip (the pole side) attaches it
+    attached: sheet.wires.filter((w) => pointOnSeg(l.x, l.y, w) && (l.kind === 'label' || onPoleSide(w, l))),
+  }));
 
   // --- off-grid (reported first, design C9) ---
   for (const { sym } of syms) {
@@ -550,6 +561,12 @@ function checkSheet(
     } else if (captionNames && !captionMatches(g.caption, captionNames)) {
       const nearest = captionNames[0]!;
       add('unlabeled-group', S, center(g.bounds), [g.caption], `group caption "${g.caption}" names nothing in SUBSYSTEMS.md or BOM.md; use a documented name (e.g. "${nearest}")`);
+    }
+    if (g.capItem) {
+      const cBox = textBounds({ ...g.capItem, isCaption: true });
+      if (cBox.maxX > g.bounds.maxX + TOL) {
+        add('unlabeled-group', S, center(cBox), [g.caption || g.label], `group caption "${g.caption}" overflows its group rectangle by ${fmt(cBox.maxX - g.bounds.maxX)}mm; widen the group rectangle or shorten the caption (#307)`);
+      }
     }
   }
   for (let i = 0; i < groups.length; i++) {

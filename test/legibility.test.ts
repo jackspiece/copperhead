@@ -339,4 +339,23 @@ describe('KiCad 10 hidden fields', () => {
       await cleanup();
     }
   });
+
+  it('flags group caption overflow when caption extends past group rectangle (#307)', async () => {
+    // Group box width 30mm (from 20 to 50). Caption "B. Input bypass and filtering" (30 chars)
+    // with height 2mm and CAPTION_ADVANCE 0.78 reaches 30 * 0.78 * 2 = 46.8mm > 30mm.
+    const body = `
+      (rectangle (start 20 20) (end 50 50) (stroke (width 0.152) (type solid)) (fill (type none)) (uuid "aaaa0000-0000-4000-8000-00000000r001"))
+      (text "B. Input bypass and filtering" (at 22 22 0) (effects (font (size 2 2)) (justify left top)) (uuid "aaaa0000-0000-4000-8000-00000000t001"))
+      ${symR('R1', 30, 35)}
+    `;
+    const { file, cleanup } = await inTemp(sch(body));
+    try {
+      const report = await checkLegibility(file, { docsDir: DOCS });
+            const overflowFinding = report.findings.find((f) => f.kind === 'unlabeled-group' && f.detail.includes('overflows its group rectangle'));
+      expect(overflowFinding).toBeDefined();
+      expect(overflowFinding?.detail).toContain('overflows its group rectangle');
+    } finally {
+      await cleanup();
+    }
+  });
 });
